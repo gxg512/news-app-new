@@ -1,0 +1,12 @@
+{
+  "name": "newshub",
+  "version": "1.0.0",
+  "description": "NewsHub - Infinite News Feed Application",
+  "private": true,
+  "scripts": {
+    "backend": "cd backend && npm start",
+    "frontend": "cd frontend && npm run dev",
+    "build": "cd frontend && npm run build",
+    "setup": "bash setup.sh"
+  }
+}
