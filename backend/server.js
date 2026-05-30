@@ -107,5 +107,57 @@ app.get('/api/news', async (req, res) => {
   }
 });
 
+// Fetch page title for a given URL (used by frontend to name custom sources)
+app.get('/api/fetch-title', async (req, res) => {
+  const rawUrl = req.query.url;
+  if (!rawUrl) return res.status(400).json({ error: 'Missing url parameter' });
+
+  let normalized = rawUrl;
+  if (!/^https?:\/\//i.test(normalized)) {
+    normalized = 'https://' + normalized;
+  }
+
+  try {
+    const lib = normalized.startsWith('https://') ? require('https') : require('http');
+    const urlObj = new URL(normalized);
+
+    const options = {
+      hostname: urlObj.hostname,
+      path: urlObj.pathname + urlObj.search,
+      method: 'GET',
+      headers: {
+        'User-Agent': 'NewsHub-Agent/1.0'
+      },
+      timeout: 8000
+    };
+
+    const request = lib.request(options, (response) => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => body += chunk);
+      response.on('end', () => {
+        const match = body.match(/<title[^>]*>([^<]+)<\/title>/i);
+        const title = match ? match[1].trim() : null;
+        res.json({ title });
+      });
+    });
+
+    request.on('error', (err) => {
+      console.error('Error fetching title:', err.message);
+      res.status(500).json({ error: 'Failed to fetch title' });
+    });
+
+    request.on('timeout', () => {
+      request.destroy();
+      res.status(504).json({ error: 'Request timed out' });
+    });
+
+    request.end();
+  } catch (err) {
+    console.error('Invalid URL for fetch-title:', err.message);
+    res.status(400).json({ error: 'Invalid URL' });
+  }
+});
+
 const PORT = 8000;
 app.listen(PORT, () => console.log(`News API running on port ${PORT}`));
