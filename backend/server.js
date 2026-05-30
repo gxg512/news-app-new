@@ -12,7 +12,7 @@ const parser = new Parser({
   }
 });
 
-// Map of available sources and their RSS endpoints
+// Map of available hardcoded sources and their RSS endpoints
 const NEWS_SOURCES = {
   // Romanian News Sources
   digi24: { name: 'DIGI24', url: 'https://www.digi24.ro/feed' },
@@ -51,111 +51,98 @@ const NEWS_SOURCES = {
   theverge: { name: 'The Verge', url: 'https://www.theverge.com/rss/index.xml' }
 };
 
-// Helper function to extract an image from various RSS formats
 function extractImage(item) {
   if (item.media && item.media.$ && item.media.$.url) return item.media.$.url;
   if (item.enclosure && item.enclosure.url) return item.enclosure.url;
   
-  // Fallback: Check if there's an <img> tag buried in the content/description
   const match = (item.content || item.summary || '').match(/<img[^>]+src="([^">]+)"/);
-  return match ? match[1] : 'https://images.unsplash.com/photo-1504711434969-e33886168f5c?q=80&w=600'; // Default placeholder
+  return match ? match[1] : 'https://images.unsplash.com/photo-1504711434969-e33886168f5c?q=80&w=600';
 }
 
+// Main Aggregation Endpoint
 app.get('/api/news', async (req, res) => {
   try {
-    // Expecting comma-separated sources, e.g., ?sources=bbc,techcrunch&page=1
-    const requestedSources = req.query.sources ? req.query.sources.split(',') : Object.keys(NEWS_SOURCES);
+    const requestedSources = req.query.sources ? req.query.sources.split(',') : [];
     const page = parseInt(req.query.page) || 1;
     const limit = 10; 
+    const customUrlsParam = req.query.customUrls ? req.query.customUrls.split(',') : [];
 
     let allArticles = [];
+    let jobs = [];
 
-    // Fetch data from all selected sources simultaneously
-    await Promise.all(requestedSources.map(async (sourceKey) => {
+    // 1. Queue hardcoded sources
+    requestedSources.forEach((sourceKey) => {
       const source = NEWS_SOURCES[sourceKey];
-      if (!source) return;
-
-      try {
-        const feed = await parser.parseURL(source.url);
-        const articles = feed.items.map(item => ({
-          title: item.title,
-          link: item.link,
-          date: new Date(item.pubDate || item.isoDate),
-          source: source.name,
-          image: extractImage(item)
-        }));
-        allArticles.push(...articles);
-      } catch (err) {
-        console.error(`Failed to fetch source ${sourceKey}:`, err.message);
+      if (source) {
+        jobs.push((async () => {
+          try {
+            const feed = await parser.parseURL(source.url);
+            return feed.items.map(item => ({
+              title: item.title,
+              link: item.link,
+              date: new Date(item.pubDate || item.isoDate || Date.now()),
+              source: source.name,
+              image: extractImage(item)
+            }));
+          } catch (err) {
+            return [];
+          }
+        })());
       }
-    }));
+    });
 
-    // CRITICAL: Sort chronologically (newest first)
+    // 2. Queue custom inputs
+    customUrlsParam.forEach((pair) => {
+      const [name, url] = pair.split('|');
+      if (name && url) {
+        jobs.push((async () => {
+          try {
+            const feed = await parser.parseURL(decodeURIComponent(url));
+            return feed.items.map(item => ({
+              title: item.title,
+              link: item.link,
+              date: new Date(item.pubDate || item.isoDate || Date.now()),
+              source: decodeURIComponent(name),
+              image: extractImage(item)
+            }));
+          } catch (err) {
+            return [];
+          }
+        })());
+      }
+    });
+
+    const results = await Promise.all(jobs);
+    results.forEach(articles => allArticles.push(...articles));
+
     allArticles.sort((a, b) => b.date - a.date);
 
-    // Paginate the sorted results
     const startIndex = (page - 1) * limit;
     const endIndex = startIndex + limit;
-    const paginatedArticles = allArticles.slice(startIndex, endIndex);
-
+    
     res.json({
-      articles: paginatedArticles,
+      articles: allArticles.slice(startIndex, endIndex),
       hasMore: endIndex < allArticles.length
     });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to aggregate news feeds' });
+    res.status(500).json({ error: 'Failed to aggregate feeds' });
   }
 });
 
-// Fetch page title for a given URL (used by frontend to name custom sources)
+// Super simplified title fetcher using standard global fetch (supported natively in Node 18+)
 app.get('/api/fetch-title', async (req, res) => {
-  const rawUrl = req.query.url;
-  if (!rawUrl) return res.status(400).json({ error: 'Missing url parameter' });
-
-  let normalized = rawUrl;
-  if (!/^https?:\/\//i.test(normalized)) {
-    normalized = 'https://' + normalized;
-  }
-
   try {
-    const lib = normalized.startsWith('https://') ? require('https') : require('http');
-    const urlObj = new URL(normalized);
+    let url = req.query.url;
+    if (!url) return res.status(400).json({ error: 'Missing URL' });
+    if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
 
-    const options = {
-      hostname: urlObj.hostname,
-      path: urlObj.pathname + urlObj.search,
-      method: 'GET',
-      headers: {
-        'User-Agent': 'NewsHub-Agent/1.0'
-      },
-      timeout: 8000
-    };
-
-    const request = lib.request(options, (response) => {
-      let body = '';
-      response.setEncoding('utf8');
-      response.on('data', (chunk) => body += chunk);
-      response.on('end', () => {
-        const match = body.match(/<title[^>]*>([^<]+)<\/title>/i);
-        const title = match ? match[1].trim() : null;
-        res.json({ title });
-      });
-    });
-
-    request.on('error', (err) => {
-      console.error('Error fetching title:', err.message);
-      res.status(500).json({ error: 'Failed to fetch title' });
-    });
-
-    request.on('timeout', () => {
-      request.destroy();
-      res.status(504).json({ error: 'Request timed out' });
-    });
-
-    request.end();
+    const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    const text = await response.text();
+    const match = text.match(/<title[^>]*>([^<]+)<\/title>/i);
+    
+    res.json({ title: match ? match[1].trim() : 'Custom Feed Source' });
   } catch (err) {
-    console.error('Invalid URL for fetch-title:', err.message);
-    res.status(400).json({ error: 'Invalid URL' });
+    res.json({ title: 'Custom Feed Source' });
   }
 });
 

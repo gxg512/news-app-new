@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 
 const DEFAULT_SOURCES = [
-  // Romanian News Sources
   { id: 'digi24', name: 'DIGI24' },
   { id: 'hotnews', name: 'HotNews' },
   { id: 'mediafax', name: 'Mediafax' },
@@ -32,479 +31,389 @@ const DEFAULT_SOURCES = [
   { id: 'click_ro', name: 'Click.ro' },
   { id: 'prunu_ro', name: 'PruniNews' },
   { id: 'desprecriza', name: 'DesprecRiza' },
-  // International News
   { id: 'bbc', name: 'BBC News' },
   { id: 'techcrunch', name: 'TechCrunch' },
   { id: 'theverge', name: 'The Verge' }
 ];
 
 export default function App() {
-  const [sources, setSources] = useState(DEFAULT_SOURCES);
+  // Source states
   const [selectedSources, setSelectedSources] = useState([]);
-  const [isConfigured, setIsConfigured] = useState(false);
+  const [customSources, setCustomSources] = useState(() => {
+    const saved = localStorage.getItem('newshub_custom_sources');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [selectedCustomSources, setSelectedCustomSources] = useState([]);
+
+  // Form input state
+  const [customName, setCustomName] = useState('');
+  const [customUrl, setCustomUrl] = useState('');
+  const [inputError, setInputError] = useState('');
+
+  // Feed engine states
+  const [isStreaming, setIsStreaming] = useState(false);
   const [articles, setArticles] = useState([]);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
-  const [newSourceName, setNewSourceName] = useState('');
-  const [newSourceId, setNewSourceId] = useState('');
-  const [newSourceUrl, setNewSourceUrl] = useState('');
-  const [searchInput, setSearchInput] = useState('');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [lastRefresh, setLastRefresh] = useState(null);
-  const [showSidebar, setShowSidebar] = useState(true);
-  const observerTarget = useRef(null);
+  const [apiError, setApiError] = useState('');
 
+  const observer = useRef();
+
+  // Keep custom sources synchronized in browser cache
+  useEffect(() => {
+    localStorage.setItem('newshub_custom_sources', JSON.stringify(customSources));
+  }, [customSources]);
+
+  // Toggle selection for native sources
   const toggleSource = (id) => {
     setSelectedSources(prev => 
       prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]
     );
   };
 
-  const addCustomSource = () => {
-    if (newSourceName.trim() && newSourceId.trim()) {
-      const customSource = {
-        id: newSourceId.toLowerCase().replace(/\s+/g, '_'),
-        name: newSourceName
-      };
-      setSources(prev => [...prev, customSource]);
-      setNewSourceName('');
-      setNewSourceId('');
+  // Toggle selection for user added sources
+  const toggleCustomSource = (url) => {
+    setSelectedCustomSources(prev =>
+      prev.includes(url) ? prev.filter(item => item !== url) : [...prev, url]
+    );
+  };
+
+  // Add custom layout resource handler
+  const handleAddCustomSource = (e) => {
+    e.preventDefault();
+    setInputError('');
+
+    if (!customName.trim() || !customUrl.trim()) {
+      setInputError('Both name and feed URL fields are required.');
+      return;
     }
-  };
 
-  const addSourceFromUrl = () => {
-    const raw = newSourceUrl.trim();
-    if (!raw) return;
-    try {
-      const normalized = raw.startsWith('http') ? raw : `https://${raw}`;
-      // Try to fetch a nicer title from backend; fall back to hostname-derived name
-      fetch(`http://localhost:8000/api/fetch-title?url=${encodeURIComponent(normalized)}`)
-        .then(r => r.json())
-        .then(data => {
-          const u = new URL(normalized);
-          const hostname = u.hostname.replace(/^www\./, '');
-          const id = hostname.toLowerCase().replace(/[^a-z0-9]+/g, '_');
-          let name = hostname.split('.')[0] || hostname;
-          if (data && data.title) {
-            // Use the title but cap to reasonable length
-            name = data.title.length > 40 ? data.title.slice(0, 37) + '...' : data.title;
-          } else {
-            name = name.charAt(0).toUpperCase() + name.slice(1);
-          }
-          const customSource = { id, name };
-          setSources(prev => prev.some(s => s.id === id) ? prev : [...prev, customSource]);
-          setSelectedSources(prev => prev.includes(id) ? prev : [...prev, id]);
-          setNewSourceUrl('');
-        })
-        .catch(err => {
-          console.error('Error fetching title, falling back to hostname', err);
-          const u = new URL(normalized);
-          const hostname = u.hostname.replace(/^www\./, '');
-          const id = hostname.toLowerCase().replace(/[^a-z0-9]+/g, '_');
-          const namePart = hostname.split('.')[0] || hostname;
-          const name = namePart.charAt(0).toUpperCase() + namePart.slice(1);
-          const customSource = { id, name };
-          setSources(prev => prev.some(s => s.id === id) ? prev : [...prev, customSource]);
-          setSelectedSources(prev => prev.includes(id) ? prev : [...prev, id]);
-          setNewSourceUrl('');
-        });
-    } catch (e) {
-      console.error('Invalid URL for source:', raw, e);
+    // Quick regex validation checking for basic HTTP pattern
+    if (!/^https?:\/\//i.test(customUrl.trim())) {
+      setInputError('Please provide a valid URL starting with http:// or https://');
+      return;
     }
+
+    // Check if URL is duplicate
+    if (customSources.some(src => src.url.toLowerCase() === customUrl.trim().toLowerCase())) {
+      setInputError('This RSS feed source URL has already been added.');
+      return;
+    }
+
+    const newSource = {
+      name: customName.trim(),
+      url: customUrl.trim()
+    };
+
+    setCustomSources(prev => [...prev, newSource]);
+    setSelectedCustomSources(prev => [...prev, newSource.url]); // Auto-check it
+    setCustomName('');
+    setCustomUrl('');
   };
 
-  const applySourceSearch = () => {
-    setSearchQuery(searchInput.trim());
+  // Clear a custom source option
+  const handleDeleteCustomSource = (urlToDelete) => {
+    setCustomSources(prev => prev.filter(src => src.url !== urlToDelete));
+    setSelectedCustomSources(prev => prev.filter(url => url !== urlToDelete));
   };
 
-  const clearSourceSearch = () => {
-    setSearchInput('');
-    setSearchQuery('');
-  };
-
-  const removeSource = (id) => {
-    setSources(prev => prev.filter(source => source.id !== id));
-    setSelectedSources(prev => prev.filter(sourceId => sourceId !== id));
-  };
-
-  // Fetch news data from Node backend
-  // Supports fetching a specific page (pageToFetch) so we can refresh
-  const fetchNews = useCallback(async (pageToFetch = page) => {
-    if (selectedSources.length === 0) return;
-    if (pageToFetch !== 1 && !hasMore) return;
-
+  // Fetch feed payload function
+  const fetchNews = useCallback(async (pageNum) => {
     setLoading(true);
+    setApiError('');
     try {
-      const response = await fetch(
-        `http://localhost:8000/api/news?sources=${selectedSources.join(',')}&page=${pageToFetch}`
-      );
-      const data = await response.json();
+      const sourceQuery = selectedSources.join(',');
+      
+      // Compile targeted custom pairs: Name|Url encoded cleanly
+      const customPairs = customSources
+        .filter(src => selectedCustomSources.includes(src.url))
+        .map(src => `${encodeURIComponent(src.name)}|${encodeURIComponent(src.url)}`)
+        .join(',');
 
-      if (pageToFetch === 1) {
-        setArticles(data.articles);
-      } else {
-        setArticles(prev => [...prev, ...data.articles]);
-      }
+      let url = `http://localhost:8000/api/news?page=${pageNum}`;
+      if (sourceQuery) url += `&sources=${sourceQuery}`;
+      if (customPairs) url += `&customUrls=${customPairs}`;
 
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Failed to retrieve server updates');
+      
+      const data = await res.json();
+      
+      setArticles(prev => pageNum === 1 ? data.articles : [...prev, ...data.articles]);
       setHasMore(data.hasMore);
-      setPage(pageToFetch + 1);
-    } catch (error) {
-      console.error("Error fetching articles:", error);
+    } catch (err) {
+      setApiError(err.message || 'Server connection failed.');
     } finally {
       setLoading(false);
     }
-  }, [page, selectedSources, hasMore]);
+  }, [selectedSources, customSources, selectedCustomSources]);
 
-  // Refresh handler to always fetch the latest articles for current sources
-  const refreshNews = useCallback(async () => {
-    if (selectedSources.length === 0) return;
-    setHasMore(true);
-    setPage(1);
+  // Handle stream initialization
+  const handleGenerateStream = () => {
+    if (selectedSources.length === 0 && selectedCustomSources.length === 0) {
+      alert('Please check at least one source before streaming.');
+      return;
+    }
     setArticles([]);
-    await fetchNews(1);
-    setLastRefresh(new Date());
-  }, [selectedSources, fetchNews]);
+    setPage(1);
+    setHasMore(true);
+    setIsStreaming(true);
+  };
 
-  // Infinite scroll observer setup
+  // Trigger loading next pages
   useEffect(() => {
-    if (!isConfigured) return;
-
-    const observer = new IntersectionObserver(
-      entries => {
-        if (entries[0].isIntersecting && hasMore && !loading) {
-          fetchNews();
-        }
-      },
-      { threshold: 0.8 }
-    );
-
-    if (observerTarget.current) {
-      observer.observe(observerTarget.current);
+    if (isStreaming) {
+      fetchNews(page);
     }
+  }, [page, isStreaming, fetchNews]);
 
-    return () => {
-      if (observerTarget.current) observer.unobserve(observerTarget.current);
-    };
-  }, [isConfigured, fetchNews, hasMore, loading]);
+  // Infinite scroll hook configuration
+  const lastArticleRef = useCallback((node) => {
+    if (loading) return;
+    if (observer.current) observer.current.disconnect();
 
-  // Fetch initial articles when sources are selected
-  useEffect(() => {
-    if (isConfigured && articles.length === 0) {
-      fetchNews();
-    }
-  }, [isConfigured]);
+    observer.current = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting && hasMore) {
+        setPage(prev => prev + 1);
+      }
+    });
 
-  // View 1: Setup Dashboard with Source Management
-  if (!isConfigured) {
-    return (
-      <div className="min-h-screen bg-slate-900 text-white flex">
-        {/* Left Sidebar - Source Management */}
-        <div className="w-80 bg-slate-800 border-r border-slate-700 p-6 overflow-y-auto">
-          <h2 className="text-2xl font-bold mb-6 text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400">
-            News Sources
-          </h2>
+    if (node) observer.current.observe(node);
+  }, [loading, hasMore]);
 
-          {/* Add Custom Source */}
-          <div className="mb-6 p-4 bg-slate-700/50 rounded-lg border border-slate-600">
-            <h3 className="text-sm font-bold text-blue-400 mb-3 uppercase">Add Custom Source</h3>
-            <input
-              type="text"
-              placeholder="Source name"
-              value={newSourceName}
-              onChange={(e) => setNewSourceName(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded mb-2 text-sm placeholder-slate-400 focus:outline-none focus:border-blue-500"
-            />
-            <input
-              type="text"
-              placeholder="Source ID"
-              value={newSourceId}
-              onChange={(e) => setNewSourceId(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded mb-3 text-sm placeholder-slate-400 focus:outline-none focus:border-blue-500"
-            />
-            <button
-              onClick={addCustomSource}
-              className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 rounded font-medium text-sm transition"
-            >
-              + Add Source
-            </button>
-            
-            {/* Add by URL */}
-            <div className="mt-3">
-              <input
-                type="text"
-                placeholder="Website URL (example.com or https://example.com)"
-                value={newSourceUrl}
-                onChange={(e) => setNewSourceUrl(e.target.value)}
-                className="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded mb-2 text-sm placeholder-slate-400 focus:outline-none focus:border-blue-500"
-              />
-              <button
-                onClick={addSourceFromUrl}
-                className="w-full py-2 bg-blue-600 hover:bg-blue-700 rounded font-medium text-sm transition"
-              >
-                + Add by URL
-              </button>
-            </div>
-          </div>
+  // Go back to configuration layout dashboard
+  const handleReset = () => {
+    setIsStreaming(false);
+    setArticles([]);
+    setPage(1);
+  };
 
-          {/* Search Sources */}
-          <div className="mb-3">
-            <div className="flex gap-2">
-              <input
-                type="text"
-                placeholder="Search sources"
-                value={searchInput}
-                onChange={(e) => setSearchInput(e.target.value)}
-                className="flex-1 px-3 py-2 bg-slate-700 border border-slate-600 rounded text-sm placeholder-slate-400 focus:outline-none"
-              />
-              <button onClick={applySourceSearch} className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 rounded text-sm">Search</button>
-              <button onClick={clearSourceSearch} className="px-3 py-2 bg-slate-600 hover:bg-slate-500 rounded text-sm">Clear</button>
-            </div>
-          </div>
-
-          {/* Source List */}
-          <div className="space-y-2">
-            {sources
-              .filter(s => {
-                if (!searchQuery) return true;
-                const q = searchQuery.toLowerCase();
-                return s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q);
-              })
-              .map(source => (
-              <div
-                key={source.id}
-                className="flex items-center gap-3 p-3 bg-slate-700/50 rounded-lg border border-slate-600 hover:border-slate-500 transition group"
-              >
-                <input
-                  type="checkbox"
-                  checked={selectedSources.includes(source.id)}
-                  onChange={() => toggleSource(source.id)}
-                  className="w-4 h-4 cursor-pointer accent-blue-500"
-                />
-                <label className="flex-1 cursor-pointer text-sm font-medium">
-                  {source.name}
-                </label>
-                <button
-                  onClick={() => removeSource(source.id)}
-                  className="opacity-0 group-hover:opacity-100 px-2 py-1 text-xs bg-red-600/50 hover:bg-red-600 rounded transition"
-                  title="Remove source"
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
-          </div>
-
-          <div className="mt-6 p-3 bg-slate-700/30 rounded text-xs text-slate-400">
-            Selected: {selectedSources.length}
-          </div>
-        </div>
-
-        {/* Right Content - Start Button */}
-        <div className="flex-1 flex flex-col items-center justify-center p-6">
-          <div className="max-w-md w-full bg-slate-800 p-8 rounded-2xl shadow-xl border border-slate-700 text-center">
-            <h1 className="text-4xl font-extrabold mb-4 text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400">
-              NewsHub
-            </h1>
-            <p className="text-slate-400 mb-8">
-              {selectedSources.length === 0
-                ? 'Select at least one news source from the left to start browsing.'
-                : `Ready to browse ${selectedSources.length} source${selectedSources.length !== 1 ? 's' : ''}!`}
-            </p>
-
-            <button
-              onClick={() => selectedSources.length > 0 && setIsConfigured(true)}
-              disabled={selectedSources.length === 0}
-              className="w-full py-4 px-6 bg-gradient-to-r from-blue-500 to-indigo-600 text-white font-semibold rounded-xl shadow-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition"
-            >
-              Generate Stream
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // View 2: Infinite Scroll Feed with Sidebar
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex">
-      {/* Left Sidebar - Source Management */}
-      {showSidebar && (
-        <div className="w-80 bg-slate-900 border-r border-slate-800 p-4 overflow-y-auto">
-          <h2 className="text-xl font-bold mb-4 text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400">
-            Sources
-          </h2>
+    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans selection:bg-indigo-500 selection:text-white">
+      {/* HEADER BAR */}
+      <header className="sticky top-0 z-50 backdrop-blur-md bg-slate-900/80 border-b border-slate-800 px-6 py-4 flex justify-between items-center shadow-lg">
+        <h1 className="text-2xl font-black tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400">
+          NewsHub <span className="text-xs font-normal text-slate-400 border border-slate-700 px-2 py-0.5 rounded ml-2">v2.0</span>
+        </h1>
+        {isStreaming && (
+          <button 
+            onClick={handleReset}
+            className="px-4 py-2 text-xs font-bold uppercase tracking-wider text-indigo-400 border border-indigo-500/30 hover:border-indigo-400 rounded-lg transition bg-indigo-500/5 hover:bg-indigo-500/10"
+          >
+            ← Modify Sources
+          </button>
+        )}
+      </header>
 
-          {/* Add Custom Source */}
-          <div className="mb-4 p-3 bg-slate-800/50 rounded-lg border border-slate-700">
-            <h3 className="text-xs font-bold text-blue-400 mb-2 uppercase">Add Source</h3>
-            <input
-              type="text"
-              placeholder="Name"
-              value={newSourceName}
-              onChange={(e) => setNewSourceName(e.target.value)}
-              className="w-full px-2 py-1 bg-slate-700 border border-slate-600 rounded mb-2 text-xs placeholder-slate-500 focus:outline-none focus:border-blue-500"
-            />
-            <input
-              type="text"
-              placeholder="ID"
-              value={newSourceId}
-              onChange={(e) => setNewSourceId(e.target.value)}
-              className="w-full px-2 py-1 bg-slate-700 border border-slate-600 rounded mb-2 text-xs placeholder-slate-500 focus:outline-none focus:border-blue-500"
-            />
-            <button
-              onClick={addCustomSource}
-              className="w-full py-1 bg-emerald-600 hover:bg-emerald-700 rounded text-xs font-medium transition"
-            >
-              Add
-            </button>
-          </div>
-
-          {/* Search Sources */}
-          <div className="mb-3 px-1">
-            <div className="flex gap-2">
-              <input
-                type="text"
-                placeholder="Search sources"
-                value={searchInput}
-                onChange={(e) => setSearchInput(e.target.value)}
-                className="flex-1 px-2 py-1 bg-slate-700 border border-slate-600 rounded text-xs placeholder-slate-500 focus:outline-none"
-              />
-              <button onClick={applySourceSearch} className="px-2 py-1 bg-indigo-600 hover:bg-indigo-700 rounded text-xs">Search</button>
-              <button onClick={clearSourceSearch} className="px-2 py-1 bg-slate-600 hover:bg-slate-500 rounded text-xs">Clear</button>
+      <main className="max-w-6xl mx-auto p-6">
+        {!isStreaming ? (
+          /* SOURCE SELECTION PANEL SCREEN layout */
+          <div className="space-y-8 animate-fadeIn">
+            <div className="text-center max-w-xl mx-auto space-y-2 py-4">
+              <h2 className="text-3xl font-extrabold text-white">Assemble Your Pipeline</h2>
+              <p className="text-slate-400 text-sm">Select pre-built streams or paste custom RSS feeds below to construct an individualized content pipeline.</p>
             </div>
-          </div>
 
-          {/* Source List */}
-          <div className="space-y-1 mb-4">
-            {sources
-              .filter(s => {
-                if (!searchQuery) return true;
-                const q = searchQuery.toLowerCase();
-                return s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q);
-              })
-              .map(source => (
-              <div
-                key={source.id}
-                className="flex items-center gap-2 p-2 bg-slate-800/30 rounded hover:bg-slate-800/50 transition group"
-              >
-                <input
-                  type="checkbox"
-                  checked={selectedSources.includes(source.id)}
-                  onChange={() => toggleSource(source.id)}
-                  className="w-3 h-3 cursor-pointer accent-blue-500"
-                />
-                <label className="flex-1 cursor-pointer text-xs font-medium truncate">
-                  {source.name}
-                </label>
-                <button
-                  onClick={() => removeSource(source.id)}
-                  className="opacity-0 group-hover:opacity-100 text-xs text-red-400 hover:text-red-300 transition"
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
-          </div>
-
-          <div className="text-xs text-slate-500 p-2 bg-slate-800/30 rounded">
-            Selected: {selectedSources.length}
-          </div>
-        </div>
-      )}
-
-      {/* Main Content */}
-      <div className="flex-1 flex flex-col">
-        {/* Header */}
-        <header className="sticky top-0 z-50 backdrop-blur-md bg-slate-900/80 border-b border-slate-800 px-6 py-4">
-          <div className="flex justify-between items-center">
-            <div className="flex items-center gap-4">
-              <button
-                onClick={() => setShowSidebar(!showSidebar)}
-                className="p-2 hover:bg-slate-800 rounded transition"
-                title="Toggle sidebar"
-              >
-                {showSidebar ? '◄' : '►'}
-              </button>
-              <h2 className="text-xl font-black tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-indigo-400">
-                NEWSHUB LIVE
-              </h2>
-            </div>
-            <div className="flex gap-2 flex-wrap justify-end">
-              <button
-                onClick={refreshNews}
-                disabled={selectedSources.length === 0 || loading}
-                className="px-3 py-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-xs font-semibold transition"
-                title="Refresh latest articles"
-              >
-                ⟳ Refresh
-              </button>
-              {lastRefresh && (
-                <span className="text-xs text-slate-400 px-2 py-1">Last: {new Date(lastRefresh).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</span>
-              )}
-              {selectedSources.slice(0, 3).map(s => (
-                <span key={s} className="text-xs font-semibold px-2.5 py-1 rounded-md bg-slate-800 border border-slate-700 text-slate-400 uppercase">
-                  {s}
-                </span>
-              ))}
-              {selectedSources.length > 3 && (
-                <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-slate-800 border border-slate-700 text-slate-400">
-                  +{selectedSources.length - 3}
-                </span>
-              )}
-            </div>
-          </div>
-        </header>
-
-        {/* Articles Feed */}
-        <main className="flex-1 max-w-4xl mx-auto w-full px-4 py-8">
-          <div className="space-y-6">
-            {articles.map((article, index) => (
-              <article 
-                key={index} 
-                className="bg-slate-900 border border-slate-800/80 rounded-xl overflow-hidden hover:border-slate-700/80 transition-all duration-200 shadow-md flex flex-col md:flex-row h-auto md:h-44"
-              >
-                <div className="md:w-1/3 relative h-48 md:h-full overflow-hidden bg-slate-800">
-                  <img 
-                    src={article.image} 
-                    alt={article.title}
-                    className="w-full h-full object-cover transform hover:scale-105 transition duration-500"
-                    loading="lazy"
-                    onError={(e) => { e.target.src = 'https://images.unsplash.com/photo-1504711434969-e33886168f5c?q=80&w=600'; }}
+            {/* CUSTOM ADDITION FORM SECTION */}
+            <section className="bg-slate-900 p-6 rounded-2xl border border-slate-800 shadow-md max-w-2xl mx-auto">
+              <h3 className="text-lg font-bold text-slate-200 mb-4 flex items-center gap-2">
+                <span className="p-1 bg-indigo-500/10 text-indigo-400 rounded-lg text-sm">＋</span> Add Custom RSS Website Source
+              </h3>
+              <form onSubmit={handleAddCustomSource} className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-1">
+                  <label className="text-xs text-slate-400 font-medium">Source Name</label>
+                  <input 
+                    type="text" 
+                    placeholder="e.g., TechSpy"
+                    value={customName}
+                    onChange={(e) => setCustomName(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition"
                   />
                 </div>
-                <div className="p-5 md:w-2/3 flex flex-col justify-between">
-                  <div>
-                    <div className="flex items-center gap-2 mb-2">
-                      <span className="text-xs font-bold text-blue-400 uppercase tracking-wide">{article.source}</span>
-                      <span className="text-slate-600 text-xs">•</span>
-                      <span className="text-xs text-slate-400">{new Date(article.date).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
-                    </div>
-                    <a href={article.link} target="_blank" rel="noreferrer" className="block text-base font-semibold text-slate-200 hover:text-white line-clamp-2 transition-colors">
-                      {article.title}
-                    </a>
-                  </div>
-                  <div className="text-xs text-slate-500 mt-2">
-                    {new Date(article.date).toLocaleDateString(undefined, {month: 'short', day: 'numeric'})}
+                <div className="space-y-1">
+                  <label className="text-xs text-slate-400 font-medium">RSS Feed URL</label>
+                  <input 
+                    type="text" 
+                    placeholder="https://example.com/rss"
+                    value={customUrl}
+                    onChange={(e) => setCustomUrl(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition"
+                  />
+                </div>
+                <div className="sm:col-span-2 flex items-center justify-between pt-2">
+                  {inputError ? <p className="text-xs text-rose-400 font-medium">{inputError}</p> : <div />}
+                  <button 
+                    type="submit"
+                    className="ml-auto px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm rounded-xl transition shadow-md shadow-indigo-600/10 cursor-pointer"
+                  >
+                    Add Source
+                  </button>
+                </div>
+              </form>
+
+              {/* USER CUSTOM SOURCE BADGES */}
+              {customSources.length > 0 && (
+                <div className="mt-6 border-t border-slate-800/60 pt-4">
+                  <p className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">Your Added Feeds</p>
+                  <div className="flex flex-wrap gap-2">
+                    {customSources.map((src) => {
+                      const isChecked = selectedCustomSources.includes(src.url);
+                      return (
+                        <div 
+                          key={src.url}
+                          className={`flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-xl border text-xs transition cursor-pointer select-none ${
+                            isChecked 
+                              ? 'bg-indigo-500/10 border-indigo-500 text-indigo-300' 
+                              : 'bg-slate-950/50 border-slate-800 text-slate-400 hover:border-slate-700'
+                          }`}
+                          onClick={() => toggleCustomSource(src.url)}
+                        >
+                          <span className="font-medium truncate max-w-[120px]">{src.name}</span>
+                          <button 
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteCustomSource(src.url);
+                            }}
+                            className="text-slate-500 hover:text-rose-400 font-bold p-0.5"
+                            title="Remove"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
-              </article>
-            ))}
-          </div>
+              )}
+            </section>
 
-          {/* Infinite Scroll Trigger */}
-          <div ref={observerTarget} className="h-20 flex items-center justify-center mt-6">
-            {loading && (
-              <div className="flex gap-1.5">
-                <div className="w-2.5 h-2.5 bg-blue-500 rounded-full animate-bounce delay-100"></div>
-                <div className="w-2.5 h-2.5 bg-blue-500 rounded-full animate-bounce delay-200"></div>
-                <div className="w-2.5 h-2.5 bg-blue-500 rounded-full animate-bounce delay-300"></div>
+            {/* DEFAULT CORE ROMANIAN & INT DRIVER SOURCES COHORT GRID */}
+            <section className="space-y-3">
+              <h3 className="text-sm font-bold uppercase tracking-widest text-slate-400 border-b border-slate-800/80 pb-2">Preset Directories Available</h3>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+                {DEFAULT_SOURCES.map((source) => {
+                  const isChecked = selectedSources.includes(source.id);
+                  return (
+                    <div 
+                      key={source.id}
+                      onClick={() => toggleSource(source.id)}
+                      className={`p-4 rounded-xl border text-center font-semibold text-sm cursor-pointer select-none transition-all ${
+                        isChecked 
+                          ? 'bg-gradient-to-b from-indigo-600 to-indigo-700 border-indigo-400 text-white shadow-lg shadow-indigo-600/20 scale-[1.02]' 
+                          : 'bg-slate-900 border-slate-800/80 text-slate-300 hover:border-slate-700 hover:bg-slate-900/80'
+                      }`}
+                    >
+                      {source.name}
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+
+            {/* FLOATING ACTION BOTTOM STICKY HUB FOOTER BAR FOR TRIGGER */}
+            <div className="text-center pt-6">
+              <button 
+                onClick={handleGenerateStream}
+                className="px-10 py-4 bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-500 hover:to-pink-500 text-white font-bold rounded-2xl shadow-xl shadow-purple-900/30 transition transform hover:-translate-y-0.5 text-base cursor-pointer"
+              >
+                Generate Combined Stream →
+              </button>
+            </div>
+          </div>
+        ) : (
+          /* INFINITE STREAM FEED VIEWS */
+          <div className="space-y-6 max-w-3xl mx-auto">
+            {apiError && (
+              <div className="bg-rose-500/10 border border-rose-500/30 text-rose-300 p-4 rounded-xl text-sm">
+                ⚠️ Error aggregation update: {apiError}
               </div>
             )}
-            {!hasMore && <p className="text-slate-500 text-sm font-medium">You have caught up with all sources.</p>}
+
+            {/* DYNAMIC RENDER OF NEWS ARTICLE COMPONENT TILES */}
+            <div className="space-y-4">
+              {articles.map((article, idx) => {
+                const isLastItem = articles.length === idx + 1;
+                return (
+                  <article 
+                    key={`${article.link}-${idx}`}
+                    ref={isLastItem ? lastArticleRef : null}
+                    className="bg-slate-900 border border-slate-800/80 rounded-2xl overflow-hidden hover:border-slate-700 transition flex flex-col sm:flex-row shadow-sm hover:shadow-md"
+                  >
+                    {/* Thumbnail box component layout setup */}
+                    <div className="sm:w-48 h-40 sm:h-auto bg-slate-950 flex-shrink-0 relative overflow-hidden">
+                      <img 
+                        src={article.image} 
+                        alt=""
+                        loading="lazy"
+                        className="w-full h-full object-cover transition transform duration-500 hover:scale-105"
+                        onError={(e) => {
+                          e.target.onerror = null;
+                          e.target.src = 'https://images.unsplash.com/photo-1504711434969-e33886168f5c?q=80&w=600';
+                        }}
+                      />
+                    </div>
+
+                    {/* Article information component text body context blocks */}
+                    <div className="p-5 flex flex-col justify-between flex-grow space-y-3">
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          <span className="px-2.5 py-0.5 rounded-full bg-slate-800 text-indigo-400 font-bold border border-slate-700/60">
+                            {article.source}
+                          </span>
+                          <span className="text-slate-400 font-medium">
+                            {new Date(article.date).toLocaleDateString(undefined, {
+                              month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+                            })}
+                          </span>
+                        </div>
+                        <h3 className="text-base sm:text-lg font-bold text-white leading-snug hover:text-indigo-400 transition">
+                          <a href={article.link} target="_blank" rel="noopener noreferrer">
+                            {article.title}
+                          </a>
+                        </h3>
+                      </div>
+                      
+                      <div className="pt-1">
+                        <a 
+                          href={article.link} 
+                          target="_blank" 
+                          rel="noopener noreferrer"
+                          className="text-xs font-bold text-indigo-400 hover:text-indigo-300 inline-flex items-center gap-1 group"
+                        >
+                          Read Story <span className="transform group-hover:translate-x-0.5 transition">→</span>
+                        </a>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+
+            {/* ENGINE FEED STATUS LABELS FOOTERS SHOWN ON SCROLL OBSERVATION TRIGGER */}
+            {loading && (
+              <div className="py-8 text-center flex justify-center items-center gap-1.5 text-slate-400 text-sm font-medium">
+                <span className="w-2 h-2 rounded-full bg-indigo-500 animate-bounce [animation-delay:-0.3s]"></span>
+                <span className="w-2 h-2 rounded-full bg-indigo-500 animate-bounce [animation-delay:-0.15s]"></span>
+                <span className="w-2 h-2 rounded-full bg-indigo-500 animate-bounce"></span>
+                <span className="ml-2">Aggregating timeline blocks...</span>
+              </div>
+            )}
+
+            {!hasMore && articles.length > 0 && (
+              <div className="py-12 text-center text-xs font-bold uppercase tracking-widest text-slate-500">
+                ✓ Fully caught up with selected timelines
+              </div>
+            )}
+
+            {!loading && articles.length === 0 && !apiError && (
+              <div className="py-20 text-center text-slate-400 text-sm">
+                No articles discovered. Verify RSS sources connectivity paths.
+              </div>
+            )}
           </div>
-        </main>
-      </div>
+        )}
+      </main>
     </div>
   );
 }
