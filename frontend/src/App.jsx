@@ -48,6 +48,10 @@ export default function App() {
   const [hasMore, setHasMore] = useState(true);
   const [newSourceName, setNewSourceName] = useState('');
   const [newSourceId, setNewSourceId] = useState('');
+  const [newSourceUrl, setNewSourceUrl] = useState('');
+  const [searchInput, setSearchInput] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [lastRefresh, setLastRefresh] = useState(null);
   const [showSidebar, setShowSidebar] = useState(true);
   const observerTarget = useRef(null);
 
@@ -69,31 +73,98 @@ export default function App() {
     }
   };
 
+  const addSourceFromUrl = () => {
+    const raw = newSourceUrl.trim();
+    if (!raw) return;
+    try {
+      const normalized = raw.startsWith('http') ? raw : `https://${raw}`;
+      // Try to fetch a nicer title from backend; fall back to hostname-derived name
+      fetch(`http://localhost:8000/api/fetch-title?url=${encodeURIComponent(normalized)}`)
+        .then(r => r.json())
+        .then(data => {
+          const u = new URL(normalized);
+          const hostname = u.hostname.replace(/^www\./, '');
+          const id = hostname.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+          let name = hostname.split('.')[0] || hostname;
+          if (data && data.title) {
+            // Use the title but cap to reasonable length
+            name = data.title.length > 40 ? data.title.slice(0, 37) + '...' : data.title;
+          } else {
+            name = name.charAt(0).toUpperCase() + name.slice(1);
+          }
+          const customSource = { id, name };
+          setSources(prev => prev.some(s => s.id === id) ? prev : [...prev, customSource]);
+          setSelectedSources(prev => prev.includes(id) ? prev : [...prev, id]);
+          setNewSourceUrl('');
+        })
+        .catch(err => {
+          console.error('Error fetching title, falling back to hostname', err);
+          const u = new URL(normalized);
+          const hostname = u.hostname.replace(/^www\./, '');
+          const id = hostname.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+          const namePart = hostname.split('.')[0] || hostname;
+          const name = namePart.charAt(0).toUpperCase() + namePart.slice(1);
+          const customSource = { id, name };
+          setSources(prev => prev.some(s => s.id === id) ? prev : [...prev, customSource]);
+          setSelectedSources(prev => prev.includes(id) ? prev : [...prev, id]);
+          setNewSourceUrl('');
+        });
+    } catch (e) {
+      console.error('Invalid URL for source:', raw, e);
+    }
+  };
+
+  const applySourceSearch = () => {
+    setSearchQuery(searchInput.trim());
+  };
+
+  const clearSourceSearch = () => {
+    setSearchInput('');
+    setSearchQuery('');
+  };
+
   const removeSource = (id) => {
     setSources(prev => prev.filter(source => source.id !== id));
     setSelectedSources(prev => prev.filter(sourceId => sourceId !== id));
   };
 
   // Fetch news data from Node backend
-  const fetchNews = useCallback(async () => {
-    if (loading || !hasMore || selectedSources.length === 0) return;
-    setLoading(true);
+  // Supports fetching a specific page (pageToFetch) so we can refresh
+  const fetchNews = useCallback(async (pageToFetch = page) => {
+    if (selectedSources.length === 0) return;
+    if (pageToFetch !== 1 && !hasMore) return;
 
+    setLoading(true);
     try {
       const response = await fetch(
-        `http://localhost:8000/api/news?sources=${selectedSources.join(',')}&page=${page}`
+        `http://localhost:8000/api/news?sources=${selectedSources.join(',')}&page=${pageToFetch}`
       );
       const data = await response.json();
-      
-      setArticles(prev => [...prev, ...data.articles]);
+
+      if (pageToFetch === 1) {
+        setArticles(data.articles);
+      } else {
+        setArticles(prev => [...prev, ...data.articles]);
+      }
+
       setHasMore(data.hasMore);
-      setPage(prev => prev + 1);
+      setPage(pageToFetch + 1);
     } catch (error) {
       console.error("Error fetching articles:", error);
     } finally {
       setLoading(false);
     }
-  }, [page, loading, hasMore, selectedSources]);
+  }, [page, selectedSources, hasMore]);
+
+  // Refresh handler to always fetch the latest articles for current sources
+  const refreshNews = useCallback(async () => {
+    if (selectedSources.length === 0) return;
+    setHasMore(true);
+    setPage(1);
+    setArticles([]);
+    await fetchNews(1);
+    setLastRefresh(new Date());
+  }, [selectedSources, fetchNews]);
 
   // Infinite scroll observer setup
   useEffect(() => {
@@ -157,11 +228,49 @@ export default function App() {
             >
               + Add Source
             </button>
+            
+            {/* Add by URL */}
+            <div className="mt-3">
+              <input
+                type="text"
+                placeholder="Website URL (example.com or https://example.com)"
+                value={newSourceUrl}
+                onChange={(e) => setNewSourceUrl(e.target.value)}
+                className="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded mb-2 text-sm placeholder-slate-400 focus:outline-none focus:border-blue-500"
+              />
+              <button
+                onClick={addSourceFromUrl}
+                className="w-full py-2 bg-blue-600 hover:bg-blue-700 rounded font-medium text-sm transition"
+              >
+                + Add by URL
+              </button>
+            </div>
+          </div>
+
+          {/* Search Sources */}
+          <div className="mb-3">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                placeholder="Search sources"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                className="flex-1 px-3 py-2 bg-slate-700 border border-slate-600 rounded text-sm placeholder-slate-400 focus:outline-none"
+              />
+              <button onClick={applySourceSearch} className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 rounded text-sm">Search</button>
+              <button onClick={clearSourceSearch} className="px-3 py-2 bg-slate-600 hover:bg-slate-500 rounded text-sm">Clear</button>
+            </div>
           </div>
 
           {/* Source List */}
           <div className="space-y-2">
-            {sources.map(source => (
+            {sources
+              .filter(s => {
+                if (!searchQuery) return true;
+                const q = searchQuery.toLowerCase();
+                return s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q);
+              })
+              .map(source => (
               <div
                 key={source.id}
                 className="flex items-center gap-3 p-3 bg-slate-700/50 rounded-lg border border-slate-600 hover:border-slate-500 transition group"
@@ -251,9 +360,30 @@ export default function App() {
             </button>
           </div>
 
+          {/* Search Sources */}
+          <div className="mb-3 px-1">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                placeholder="Search sources"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                className="flex-1 px-2 py-1 bg-slate-700 border border-slate-600 rounded text-xs placeholder-slate-500 focus:outline-none"
+              />
+              <button onClick={applySourceSearch} className="px-2 py-1 bg-indigo-600 hover:bg-indigo-700 rounded text-xs">Search</button>
+              <button onClick={clearSourceSearch} className="px-2 py-1 bg-slate-600 hover:bg-slate-500 rounded text-xs">Clear</button>
+            </div>
+          </div>
+
           {/* Source List */}
           <div className="space-y-1 mb-4">
-            {sources.map(source => (
+            {sources
+              .filter(s => {
+                if (!searchQuery) return true;
+                const q = searchQuery.toLowerCase();
+                return s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q);
+              })
+              .map(source => (
               <div
                 key={source.id}
                 className="flex items-center gap-2 p-2 bg-slate-800/30 rounded hover:bg-slate-800/50 transition group"
@@ -301,6 +431,17 @@ export default function App() {
               </h2>
             </div>
             <div className="flex gap-2 flex-wrap justify-end">
+              <button
+                onClick={refreshNews}
+                disabled={selectedSources.length === 0 || loading}
+                className="px-3 py-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-xs font-semibold transition"
+                title="Refresh latest articles"
+              >
+                ⟳ Refresh
+              </button>
+              {lastRefresh && (
+                <span className="text-xs text-slate-400 px-2 py-1">Last: {new Date(lastRefresh).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</span>
+              )}
               {selectedSources.slice(0, 3).map(s => (
                 <span key={s} className="text-xs font-semibold px-2.5 py-1 rounded-md bg-slate-800 border border-slate-700 text-slate-400 uppercase">
                   {s}
